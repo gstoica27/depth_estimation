@@ -68,7 +68,7 @@ def loss(prediction, ground_truth):
     return loss
 
 # Burrowed from Masazl
-# Log invariant loss, second loss function
+# Scale invariant loss, second loss function
 def maselz_loss(logits, depths):
     predict = tf.reshape(logits, [-1, 188*621])
     depths_downsampled = tf.nn.max_pool(name = "gt_downsampled", 
