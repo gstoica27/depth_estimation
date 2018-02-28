@@ -2,8 +2,10 @@ import pandas, cv2
 import tensorflow as tf
 import numpy as np
 import math
-# rdfdfdf
-# Get data
+
+# To optimize for RAM, generate dataset consisting of only image reference strings.
+# Takes in size: number of "images" to use in training and testing
+# Returns: np.array of reference strings
 def read_references(size):
     data = []
     for reference_index in range(0, size):
@@ -15,7 +17,9 @@ def read_references(size):
             data += ["00{}".format(reference_index)]
     return np.array(data)
 
-# Get train and test reference splits
+# Optain train and test splits on image reference data
+# Parameters: references: reference data, split: percentage of data used in train vs test
+# Returns: train and test reference splits
 def train_test_split(references, split = .8):
     size = len(references)
     np.random.shuffle(references)
@@ -24,7 +28,9 @@ def train_test_split(references, split = .8):
     test_references = references[split_pivot:]
     return train_references, test_references
 
-# Declare Convolutional block
+# Convolutional block used in model
+# Parameters: tf.nn.conv2d parameters + scope name
+# Returns: block
 def convBlock(scope_name, input_layer, kernel_shape, bias_shape, strides = [1,1,1,1], padding = "SAME", reuse = False):
     with tf.variable_scope(scope_name, reuse=tf.AUTO_REUSE) as scope:
         # if reuse:
@@ -36,7 +42,10 @@ def convBlock(scope_name, input_layer, kernel_shape, bias_shape, strides = [1,1,
         conv_activation = tf.nn.relu(conv_plus_bias, scope.name)
         return conv_activation
 
-# use inverted MSE loss
+# Loss function 1
+# Calculates the mean absolute inverted difference between each pixel at 1/4 original image size between the test and training images
+# Parameters: prediction depth (1/4 original image size), ground_truth: true depth (original size)
+# Returns: loss
 def loss(prediction, ground_truth):
     prediction_flat = tf.reshape(prediction, [-1, 188*621], name = "prediction_flatten")
 
@@ -59,6 +68,7 @@ def loss(prediction, ground_truth):
     return loss
 
 # Burrowed from Masazl
+# Log invariant loss, second loss function
 def maselz_loss(logits, depths):
     predict = tf.reshape(logits, [-1, 188*621])
     depths_downsampled = tf.nn.max_pool(name = "gt_downsampled", 
@@ -78,7 +88,7 @@ def maselz_loss(logits, depths):
     return loss
 
 
-
+# Model
 # 3 Conv Model + Max pooling
 def model(input_layer):
     conv1 = convBlock(scope_name = "conv1", 
@@ -113,7 +123,12 @@ def model(input_layer):
 
 
 
-
+# Training function. 
+# Parameters: sess: session declared in main(), train_references: train reference dataset, BATCH_SIZE: batch size,
+# num_iterations: number of iterations/epochs to train over, run_keys: keys needed to perform training and optimization,
+# feed_dict_keys: keys needed to feed to the feed_dict
+# returns:N/A
+# Actual data gets loaded in at this stage.
 def train(sess, train_references, BATCH_SIZE, num_iterations=10, run_keys = [], feed_dict_keys = []):
     # Initialize Variables + extract paramaters
     train_opt, model_loss, prediction, gvs = run_keys
@@ -169,7 +184,10 @@ def train(sess, train_references, BATCH_SIZE, num_iterations=10, run_keys = [], 
     avg_total_loss = total_loss / float(num_iterations * len(train_references))
     print("The total average loss over all iterations is: " + str(avg_total_loss))
 
-
+# Test function
+# Parameters: sess: session declared in main(), test_references: test reference data, 
+# run_keys: keys needed to perform training and optimization, feed_dict_keys: keys needed to feed to the feed_dict
+# Returns: N/A 
 def test(sess, test_references, run_keys = [], feed_dict_keys = []):
     model_loss, prediction = run_keys
     input_layer, ground_truth = feed_dict_keys
@@ -187,7 +205,8 @@ def test(sess, test_references, run_keys = [], feed_dict_keys = []):
     avg_loss = float(total_loss) / float(len(test_references))    
     print("The average test loss is: " + str(avg_loss))
 
-
+# Main function
+# Initialize batch size + read/split data + build model graph and recipe + train and test
 def main(unusedargv):
     BATCH_SIZE = 8
     references = read_references(size = 10)
