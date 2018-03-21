@@ -2,10 +2,24 @@ import pandas, cv2
 import tensorflow as tf
 import numpy as np
 import math
+import matplotlib.pyplot as plt
+# rdfdfdf
+# Get data
 
-# To optimize for RAM, generate dataset consisting of only image reference strings.
-# Takes in size: number of "images" to use in training and testing
-# Returns: np.array of reference strings
+IMAGE_HEIGHT = 188
+IMAGE_WIDTH = 621
+
+def variable_summaries(var):
+  with tf.name_scope('summaries'):
+    mean = tf.reduce_mean(var)
+    tf.summary.scalar('mean', mean)
+    with tf.name_scope('stddev'):
+        stddev = tf.sqrt(tf.reduce_mean(tf.square(var - mean)))
+    tf.summary.scalar('stddev', stddev)
+    tf.summary.scalar('max', tf.reduce_max(var))
+    tf.summary.scalar('min', tf.reduce_min(var))
+    tf.summary.histogram('histogram', var)
+
 def read_references(size):
     data = []
     for reference_index in range(0, size):
@@ -17,9 +31,7 @@ def read_references(size):
             data += ["00{}".format(reference_index)]
     return np.array(data)
 
-# Optain train and test splits on image reference data
-# Parameters: references: reference data, split: percentage of data used in train vs test
-# Returns: train and test reference splits
+# Get train and test reference splits
 def train_test_split(references, split = .8):
     size = len(references)
     np.random.shuffle(references)
@@ -28,26 +40,31 @@ def train_test_split(references, split = .8):
     test_references = references[split_pivot:]
     return train_references, test_references
 
-# Convolutional block used in model
-# Parameters: tf.nn.conv2d parameters + scope name
-# Returns: block
+# Declare Convolutional block
 def convBlock(scope_name, input_layer, kernel_shape, bias_shape, strides = [1,1,1,1], padding = "SAME", reuse = False):
     with tf.variable_scope(scope_name, reuse=tf.AUTO_REUSE) as scope:
         # if reuse:
         #     scope.reuse_variables() truncated_normal_initializer
-        kernel = tf.get_variable("weights", kernel_shape, initializer = tf.truncated_normal_initializer())
+        with tf.name_scope("weights"):
+            kernel = tf.get_variable("weights", kernel_shape, initializer = tf.truncated_normal_initializer())
+            variable_summaries(kernel)
         conv = tf.nn.conv2d(name = "convolution", input = input_layer, filter = kernel, strides = strides, padding = padding)
-        bias = tf.get_variable("bias", bias_shape, initializer = tf.constant_initializer(.01))
-        conv_plus_bias = tf.nn.bias_add(conv, bias, name = "bias_add")
-        conv_activation = tf.nn.relu(conv_plus_bias, scope.name)
+        with tf.name_scope("bias"):
+            bias = tf.get_variable("bias", bias_shape, initializer = tf.constant_initializer(.01))
+            variable_summaries(bias)
+        with tf.name_scope("conv_plus_bias"):
+            conv_plus_bias = tf.nn.bias_add(conv, bias, name = "bias_add")
+            variable_summaries(conv_plus_bias)
+        with tf.name_scope("activations"):
+            conv_activation = tf.nn.relu(conv_plus_bias, scope.name)
+            variable_summaries(conv_activation)    
         return conv_activation
 
-# Loss function 1
-# Calculates the mean absolute inverted difference between each pixel at 1/4 original image size between the test and training images
-# Parameters: prediction depth (1/4 original image size), ground_truth: true depth (original size)
-# Returns: loss
+# use inverted MSE loss
 def loss(prediction, ground_truth):
-    prediction_flat = tf.reshape(prediction, [-1, 188*621], name = "prediction_flatten")
+    global IMAGE_HEIGHT, IMAGE_WIDTH
+    size = int(IMAGE_HEIGHT/2.0 * math.ceil(IMAGE_WIDTH/2.0))
+    prediction_flat = tf.reshape(prediction, [-1,size], name = "prediction_flatten")
 
     # ground_truth_reshaped = tf.reshape(ground_truth, [-1, 375, 1242, 1], name = "gt_reshaped")
     ground_truth_downsampled = tf.nn.max_pool(name = "gt_downsampled", 
@@ -55,8 +72,11 @@ def loss(prediction, ground_truth):
                            ksize = [1, 2, 2, 1], 
                            strides = [1, 2, 2, 1], 
                            padding = "SAME")
+    # print("HEYYYY!!!")
     print(ground_truth_downsampled.get_shape().as_list())
-    ground_truth_flat = tf.reshape(ground_truth_downsampled, [-1, 188*621], name = "gt_flattened")
+    # ground_truth_downsampled = tf.Print(ground_truth_downsampled.get_shape(), [ground_truth_downsampled], "The shape is: ")
+    # print("yo")
+    ground_truth_flat = tf.reshape(ground_truth_downsampled, [-1, size], name = "gt_flattened")
 
     ground_truth_flat_inverted = tf.divide(1.0, tf.add(ground_truth_flat,  1), name = "gt_inverted")
     prediction_flat_inverted = tf.divide(1.0, tf.add(prediction_flat, 1), name = "prediction_inverted")
@@ -68,32 +88,124 @@ def loss(prediction, ground_truth):
     return loss
 
 # Burrowed from Masazl
-# Scale invariant loss, second loss function
 def maselz_loss(logits, depths):
-    predict = tf.reshape(logits, [-1, 188*621])
-    depths_downsampled = tf.nn.max_pool(name = "gt_downsampled", 
-                           value = depths, 
-                           ksize = [1, 2, 2, 1], 
-                           strides = [1, 2, 2, 1], 
-                           padding = "SAME")
+    global IMAGE_HEIGHT, IMAGE_WIDTH
+    size = (IMAGE_HEIGHT/2.0)* math.ceil(IMAGE_WIDTH/2.0)
+    with tf.name_scope("scale_invariant_loss"):
+        predict = tf.reshape(logits, [-1,int(size)])
+        depths_downsampled = tf.nn.max_pool(name = "gt_downsampled", 
+                               value = depths, 
+                               ksize = [1, 2, 2, 1], 
+                               strides = [1, 2, 2, 1], 
+                               padding = "SAME")
 
-    target = tf.reshape(depths_downsampled, [-1, 188*621])
+        target = tf.reshape(depths_downsampled, [-1, int(size)])
 
-    d = tf.subtract(predict, target)
-    square_d = tf.square(d)
-    sum_square_d = tf.reduce_sum(square_d, 1)
-    sum_d = tf.reduce_sum(d, 1)
-    sqare_sum_d = tf.square(sum_d)
-    loss = tf.reduce_mean(sum_square_d / 188.0*621.0 - 0.5*sqare_sum_d / math.pow(188.0*621, 2))
+        d = tf.subtract(predict, target)
+        square_d = tf.square(d)
+        sum_square_d = tf.reduce_sum(square_d, 1)
+        sum_d = tf.reduce_sum(d, 1)
+        sqare_sum_d = tf.square(sum_d)
+        loss = tf.reduce_mean(sum_square_d /size - 0.5*sqare_sum_d / math.pow(size, 2))
+    tf.summary.scalar("loss", loss)
     return loss
 
 
-# Model
+
 # 3 Conv Model + Max pooling
-def model(input_layer):
-    conv1 = convBlock(scope_name = "conv1", 
+# def model(input_layer):
+#     conv1 = convBlock(scope_name = "conv1", 
+#                       input_layer = input_layer, 
+#                       kernel_shape = [3, 3, 3, 50], 
+#                       bias_shape = [50], 
+#                       strides = [1, 1, 1, 1], 
+#                       padding = "SAME", 
+#                       reuse = True)
+#     conv2 = convBlock(scope_name = "conv2", 
+#                       input_layer = conv1, 
+#                       kernel_shape = [3, 3, 50, 100], 
+#                       bias_shape = [100], 
+#                       strides = [1, 1, 1, 1], 
+#                       padding = "SAME", 
+#                       reuse = True)
+#     pool1 = tf.nn.max_pool(name = "pool1", 
+#                            value = conv2, 
+#                            ksize = [1, 2, 2, 1], 
+#                            strides = [1, 2, 2, 1], 
+#                            padding = "SAME")
+#     conv3 = convBlock(scope_name = "conv3", 
+#                       input_layer = pool1, 
+#                       kernel_shape = [3, 3, 100, 1], 
+#                       bias_shape = [1], 
+#                       strides = [1, 1, 1, 1], 
+#                       padding = "SAME", 
+#                       reuse = True)
+
+#     # print(conv3.get_shape().as_list())
+#     return conv3
+
+def inception_module(input_layer, input_channels, ID):
+    # First Layers
+    conv_1x1 = convBlock(scope_name = "1x1_conv_{}".format(ID),
                       input_layer = input_layer, 
-                      kernel_shape = [3, 3, 3, 50], 
+                      kernel_shape = [1, 1, input_channels, 20],
+                      bias_shape = [20],
+                      strides = [1, 1, 1, 1],
+                      padding = "SAME",
+                      reuse = True)
+    dim_red_1 = convBlock(scope_name = "1x1_conv_for_3x3_{}".format(ID),
+                          input_layer = input_layer, 
+                          kernel_shape = [1, 1, input_channels, 3],
+                          bias_shape = [3],
+                          strides = [1, 1, 1, 1],
+                          padding = "SAME",
+                          reuse = True)
+    dim_red_2 = convBlock(scope_name = "1x1_conv_for_5x5_{}".format(ID),
+                          input_layer = input_layer, 
+                          kernel_shape = [1, 1, input_channels, 3],
+                          bias_shape = [3],
+                          strides = [1, 1, 1, 1],
+                          padding = "SAME",
+                          reuse = True)
+    pool_3x3 = tf.nn.max_pool(name = "pool_3x3_{}".format(ID),  
+                           value = input_layer, 
+                           ksize = [1, 3, input_channels, 1], 
+                           strides = [1, 1, 1, 1], 
+                           padding = "SAME")
+    # Layer 2 Convolutions
+    conv_3x3 = convBlock(scope_name = "conv_3x3_{}".format(ID),
+                          input_layer = dim_red_1, 
+                          kernel_shape = [3, 3, 3, 20],
+                          bias_shape = [20],
+                          strides = [1, 1, 1, 1],
+                          padding = "SAME",
+                          reuse = True)
+    conv_5x5 = convBlock(scope_name = "conv_5x5_{}".format(ID),
+                          input_layer = dim_red_2, 
+                          kernel_shape = [5, 5, 3, 20],
+                          bias_shape = [20],
+                          strides = [1, 1, 1, 1],
+                          padding = "SAME",
+                          reuse = True)
+    pool_conv_1x1 = convBlock(scope_name = "3x3_pool_to_conv_1x1_{}".format(ID),
+                          input_layer = pool_3x3, 
+                          kernel_shape = [1, 1, input_channels, 20],
+                          bias_shape = [20],
+                          strides = [1, 1, 1, 1],
+                          padding = "SAME",
+                          reuse = True)
+    # Concatenate Everything
+    filter_concat = tf.concat(values = [conv_1x1, conv_3x3, conv_5x5, pool_conv_1x1],
+        axis = 3)
+    return filter_concat
+
+def model(input_layer):
+    inception_1 = inception_module(input_layer = input_layer, input_channels = 3, ID = 1)
+    # inception_2 = inception_module(input_layer = inception_1, input_channels = inception_1.get_shape().as_list()[3], ID = 2)
+    # inception_3 = inception_module(input_layer = inception_2, input_channels = inception_2.get_shape().as_list()[3], ID = 3)
+    conv1 = convBlock(scope_name = "conv1", 
+                      input_layer = inception_1, 
+                      kernel_shape = [3, 3, inception_1.get_shape().as_list()[3], 50], 
                       bias_shape = [50], 
                       strides = [1, 1, 1, 1], 
                       padding = "SAME", 
@@ -118,24 +230,67 @@ def model(input_layer):
                       padding = "SAME", 
                       reuse = True)
 
-    print(conv3.get_shape().as_list())
+    # dim_red_3 = tf.nn.max_pool(name = "max_pool", 
+    #                        value = inception_1, 
+    #                        ksize = [1, 2, 2, 1], 
+    #                        strides = [1, 2, 2, 1], 
+    #                        padding = "SAME")
+    # output = convBlock(scope_name = "output", 
+    #                   input_layer = dim_red_3, 
+    #                   kernel_shape = [1, 1, 80, 1], 
+    #                   bias_shape = [1], 
+    #                   strides = [1, 1, 1, 1], 
+    #                   padding = "SAME", 
+    #                   reuse = True)
     return conv3
 
 
 
-# Training function. 
-# Parameters: sess: session declared in main(), train_references: train reference dataset, BATCH_SIZE: batch size,
-# num_iterations: number of iterations/epochs to train over, run_keys: keys needed to perform training and optimization,
-# feed_dict_keys: keys needed to feed to the feed_dict
-# returns:N/A
-# Actual data gets loaded in at this stage.
-def train(sess, train_references, BATCH_SIZE, num_iterations=10, run_keys = [], feed_dict_keys = []):
+def validate(sess, num_epochs, test_references, run_keys = [], feed_dict_keys = []):
+    global IMAGE_HEIGHT, IMAGE_WIDTH
+    model_loss, prediction = run_keys
+    input_layer, ground_truth = feed_dict_keys
+    total_loss = 0
+    for test_reference in test_references:
+        depth_filename = "/Users/georgestoica/Desktop/Research/Mini-Project/ds_depth/{}.png".format(test_reference)
+        input_filename = "/Users/georgestoica/Desktop/Research/Mini-Project/ds_image/{}.png".format(test_reference)
+        depth = np.reshape(cv2.imread(depth_filename, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH), (1, IMAGE_HEIGHT, IMAGE_WIDTH, 1))
+        input_img = np.reshape(cv2.imread(input_filename, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH), (1, IMAGE_HEIGHT, IMAGE_WIDTH, 3))
+
+        loss, pred = sess.run([model_loss, prediction], 
+                                                      feed_dict = {input_layer: input_img, 
+                                                                   ground_truth: depth})
+        # Encode Image
+        pred_rs = tf.reshape(pred, [94, 311, 1])
+        pred_u16 = tf.image.convert_image_dtype(pred_rs, tf.uint16)
+        pred_enc = tf.image.encode_png(pred_u16)
+        depth_fpath = tf.constant("/Users/georgestoica/Desktop/Research/Mini-Project/pred_depth_{}/{}.png".format(num_epochs, test_reference))
+        depth_write = tf.write_file(depth_fpath, pred_enc)
+        dummy_ = sess.run(depth_write)
+        total_loss += loss
+    return total_loss
+
+
+
+# reererre
+def train(sess, write_op, train_references,
+          test_references, BATCH_SIZE, 
+          num_iterations=10, run_keys = [], 
+          feed_dict_keys = [], 
+          run_keys_validate = [], 
+          feed_dict_validate = []):
+
+    global IMAGE_HEIGHT, IMAGE_WIDTH
     # Initialize Variables + extract paramaters
     train_opt, model_loss, prediction, gvs = run_keys
     input_layer, ground_truth = feed_dict_keys
     input_batch = np.zeros([])
     ground_truth_batch = np.zeros([])
     total_loss = 0
+    writer = tf.summary.FileWriter("./logs/plot_1")
+    # Initialize Plotting Variables
+    epochs = [i for i in range(num_iterations)]
+    epoch_loss = [0 for i in range(num_iterations)]
 
     for iteration in range(num_iterations):
         total_iteration_loss = 0
@@ -147,10 +302,10 @@ def train(sess, train_references, BATCH_SIZE, num_iterations=10, run_keys = [], 
             # Check that current batch is smaller than batch size + train reference index is in bounds. 
             while current_batch < BATCH_SIZE and index < len(train_references):
                 train_reference = train_references[index]
-                depth_filename = "/Users/georgestoica/Desktop/Research/Mini-Project/vkitti_1.3.1_depthgt/0001/clone/{}.png".format(train_reference)
-                input_filename = "/Users/georgestoica/Desktop/Research/Mini-Project/vkitti_1.3.1_rgb/0001/clone/{}.png".format(train_reference)
-                depth = np.reshape(cv2.imread(depth_filename, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH), (1, 375, 1242, 1))
-                input_img = np.reshape(cv2.imread(input_filename, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH), (1, 375, 1242, 3))
+                depth_filename = "/Users/georgestoica/Desktop/Research/Mini-Project/ds_depth/{}.png".format(train_reference)
+                input_filename = "/Users/georgestoica/Desktop/Research/Mini-Project/ds_image/{}.png".format(train_reference)
+                depth = np.reshape(cv2.imread(depth_filename, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH), (1, IMAGE_HEIGHT, IMAGE_WIDTH, 1))
+                input_img = np.reshape(cv2.imread(input_filename, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH), (1, IMAGE_HEIGHT, IMAGE_WIDTH, 3))
                 # set batch arrays if dimensions are un-initialized
                 if current_batch == 0:
                     input_batch = input_img
@@ -163,8 +318,8 @@ def train(sess, train_references, BATCH_SIZE, num_iterations=10, run_keys = [], 
                 current_batch += 1
                 index += 1
             # reshape batches for model compatibility
-            input_batch = np.reshape(input_batch, (BATCH_SIZE, 375, 1242, 3))
-            ground_truth_batch = np.reshape(ground_truth_batch, (BATCH_SIZE, 375, 1242, 1))
+            input_batch = np.reshape(input_batch, (BATCH_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH, 3))
+            ground_truth_batch = np.reshape(ground_truth_batch, (BATCH_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH, 1))
 
             # run model
             _dummy1, loss, _dummy3 = sess.run([train_opt, model_loss, prediction], 
@@ -176,45 +331,65 @@ def train(sess, train_references, BATCH_SIZE, num_iterations=10, run_keys = [], 
             total_iteration_loss += loss
             # print("The loss for this batch is: " + str(loss))
             
-        
+        summary = sess.run(write_op, {input_layer: input_batch, 
+                                         ground_truth: ground_truth_batch})
+        writer.add_summary(summary, iteration)
+        writer.flush()
+
         avg_iteration_loss = total_iteration_loss / float(len(train_references))
         print("The average loss for iteration {} is: ".format(iteration+1) + str(avg_iteration_loss))
 
+        epoch_loss[iteration] = total_iteration_loss
         total_loss += total_iteration_loss
+
+        if iteration % 20 == 0:
+           validation_loss = validate(sess, iteration, 
+                                      test_references, run_keys = run_keys_validate, 
+                                      feed_dict_keys = feed_dict_validate)
+
     avg_total_loss = total_loss / float(num_iterations * len(train_references))
     print("The total average loss over all iterations is: " + str(avg_total_loss))
+    plt.plot(epochs, epoch_loss, 'b-')
+    plt.show(sess, test_references, run_keys = [], feed_dict_keys = [])
 
-# Test function
-# Parameters: sess: session declared in main(), test_references: test reference data, 
-# run_keys: keys needed to perform training and optimization, feed_dict_keys: keys needed to feed to the feed_dict
-# Returns: N/A 
+
 def test(sess, test_references, run_keys = [], feed_dict_keys = []):
+    global IMAGE_HEIGHT, IMAGE_WIDTH
     model_loss, prediction = run_keys
     input_layer, ground_truth = feed_dict_keys
     total_loss = 0
     for test_reference in test_references:
-        depth_filename = "/Users/georgestoica/Desktop/Research/Mini-Project/vkitti_1.3.1_depthgt/0001/clone/{}.png".format(test_reference)
-        input_filename = "/Users/georgestoica/Desktop/Research/Mini-Project/vkitti_1.3.1_rgb/0001/clone/{}.png".format(test_reference)
-        depth = np.reshape(cv2.imread(depth_filename, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH), (1, 375, 1242, 1))
-        input_img = np.reshape(cv2.imread(input_filename, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH), (1, 375, 1242, 3))
+        depth_filename = "/Users/georgestoica/Desktop/Research/Mini-Project/ds_depth/{}.png".format(test_reference)
+        input_filename = "/Users/georgestoica/Desktop/Research/Mini-Project/ds_image/{}.png".format(test_reference)
+        depth = np.reshape(cv2.imread(depth_filename, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH), (1, IMAGE_HEIGHT, IMAGE_WIDTH, 1))
+        input_img = np.reshape(cv2.imread(input_filename, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH), (1, IMAGE_HEIGHT, IMAGE_WIDTH, 3))
 
-        loss, _dummy3 = sess.run([model_loss, prediction], 
+        loss, pred = sess.run([model_loss, prediction], 
                                                       feed_dict = {input_layer: input_img, 
                                                                    ground_truth: depth})
+        # Encode Image
+        pred_rs = tf.reshape(pred, [94, 311, 1])
+        pred_u16 = tf.image.convert_image_dtype(pred_rs, tf.uint16)
+        pred_enc = tf.image.encode_png(pred_u16)
+        depth_fpath = tf.constant("/Users/georgestoica/Desktop/Research/Mini-Project/pred_depth/{}.png".format(test_reference))
+        depth_write = tf.write_file(depth_fpath, pred_enc)
+        dummy_ = sess.run(depth_write)
+
+
         total_loss += loss
     avg_loss = float(total_loss) / float(len(test_references))    
     print("The average test loss is: " + str(avg_loss))
 
-# Main function
-# Initialize batch size + read/split data + build model graph and recipe + train and test
+
 def main(unusedargv):
+    global IMAGE_HEIGHT, IMAGE_WIDTH
     BATCH_SIZE = 8
-    references = read_references(size = 10)
+    references = read_references(size = 250)
     train_references, test_references = train_test_split(references, split = .8)
     with tf.Graph().as_default():
         # Set up Placeholders
-        input_layer = tf.placeholder(tf.float32, shape=(None, 375, 1242, 3))
-        ground_truth = tf.placeholder(tf.float32, shape=(None, 375, 1242, 1))
+        input_layer = tf.placeholder(tf.float32, shape=(None, IMAGE_HEIGHT, IMAGE_WIDTH, 3))
+        ground_truth = tf.placeholder(tf.float32, shape=(None, IMAGE_HEIGHT, IMAGE_WIDTH, 1))
         # Set up Build Recipe
         prediction = model(input_layer)
         model_loss = maselz_loss(prediction, ground_truth)
@@ -224,20 +399,31 @@ def main(unusedargv):
         gvs = optimizer.compute_gradients(model_loss)
         train_opt = optimizer.apply_gradients(gvs)
         init_op = tf.global_variables_initializer()
+        write_op = tf.summary.merge_all()
         sess = tf.Session()
         sess.run(init_op)
         writer = tf.summary.FileWriter("/tmp/log/test", sess.graph)
+
+        run_keys_train = [train_opt, model_loss, prediction, gvs]
+        feed_dict_keys_train = [input_layer, ground_truth]
+
+        run_keys_test = [model_loss, prediction]
+        feed_dict_keys_test = [input_layer, ground_truth]
 
         # train
         print("Training...")
         run_keys_train = [train_opt, model_loss, prediction, gvs]
         feed_dict_keys_train = [input_layer, ground_truth]
         train(sess, 
-              train_references, 
+              write_op,
+              train_references,
+              test_references,
               BATCH_SIZE, 
-              num_iterations = 50,
+              num_iterations = 1000,
               run_keys = run_keys_train, 
-              feed_dict_keys = feed_dict_keys_train)
+              feed_dict_keys = feed_dict_keys_train,
+              run_keys_validate = run_keys_test,
+              feed_dict_validate = feed_dict_keys_test)
         print("Testing....")
         # test
         run_keys_test = [model_loss, prediction]
